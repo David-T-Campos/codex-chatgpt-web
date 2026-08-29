@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { compileChatGptWebPrompt } from "../src/adapters/chatgpt-web/prompt";
+import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import type { CodexParsedRequest } from "../src/types";
 
 const capabilities = { localToolsEnabled: true, solAvailable: true, proAvailable: true };
@@ -7,7 +8,7 @@ const turnToken = "turn_12345678901234567890123456789012";
 
 function parsed(): CodexParsedRequest {
   return {
-    modelId: "chatgpt-web/high",
+    modelId: CHATGPT_WEB_MODEL_ID,
     stream: true,
     options: { reasoning: "high" },
     context: {
