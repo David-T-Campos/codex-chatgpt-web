@@ -1,0 +1,86 @@
+name: Gauntlet Pro native subagents retry
+
+on:
+  push:
+    branches:
+      - parity/pro-native-subagents-work
+
+permissions:
+  contents: write
+
+jobs:
+  patch-verify-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: parity/pro-native-subagents-work
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - name: Patch Pro native delegation parity
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          prompt = Path('src/adapters/chatgpt-web/prompt.ts')
+          text = prompt.read_text()
+          pattern = re.compile(
+              r'\n\s*const proDelegationContract = !parsed\._compactionRequest && mode\.effort === "max"\s*'
+              r'\? \[\s*"Complete this task directly in the current parent response\.[^"]+"\s*,?\s*\]\s*:\s*\[\];\s*\n'
+          )
+          text, count = pattern.subn('\n', text, count=1)
+          assert count == 1, 'Pro delegation contract not found exactly once'
+          spread_count = text.count('...proDelegationContract,')
+          assert spread_count == 2, f'expected two Pro contract spreads, found {spread_count}'
+          text = '\n'.join(line for line in text.splitlines() if '...proDelegationContract,' not in line) + '\n'
+          prompt.write_text(text)
+
+          tests = Path('tests/prompt-contract.test.ts')
+          text = tests.read_text()
+          pattern = re.compile(
+              r'test\("Pro executes directly without delegating while other Web modes keep their existing contract", \(\) => \{.*?\n\}\);\n',
+              re.S,
+          )
+          replacement = '''test("Pro preserves the same native Codex delegation contract as Extra High", () => {
+            const token = "turn_12345678901234567890123456789012";
+            const capabilities = { localToolsEnabled: true, solAvailable: true, proAvailable: true };
+            const pro = compileChatGptWebPrompt(request("max"), capabilities, token);
+            const extraHigh = compileChatGptWebPrompt(request("xhigh"), capabilities, token);
+
+            for (const compiled of [pro, extraHigh]) {
+              expect(compiled.text).toContain("For local work required by the task, use the attached Codex Native tools directly according to their declared descriptions and schemas.");
+              expect(compiled.text).toContain(`Pass turn_token ${token} unchanged to every Codex Native call in this response`);
+              expect(compiled.text).not.toContain("Complete this task directly in the current parent response.");
+              expect(compiled.text).not.toContain("Do not create, spawn, delegate to, or wait on sub-agents");
+              expect(compiled.text).not.toContain("Use non-agent tools directly instead.");
+            }
+          });
+          '''
+          text, count = pattern.subn(replacement, text, count=1)
+          assert count == 1, 'Pro delegation regression test not found exactly once'
+          tests.write_text(text)
+          PY
+      - name: Install root dependencies
+        run: bun install --frozen-lockfile
+      - name: Install launcher dependencies
+        working-directory: launcher
+        run: bun install --frozen-lockfile
+      - name: Targeted native-agent tests
+        run: bun test tests/prompt-contract.test.ts tests/server-subagents.test.ts tests/chatgpt-web-harness.test.ts
+      - name: Typecheck
+        run: bunx tsc --noEmit
+      - name: Full verification
+        run: bun run verify
+      - name: Commit verified parity fix
+        shell: bash
+        run: |
+          rm .github/workflows/gauntlet-pro-subagents.yml .github/workflows/gauntlet-pro-subagents-2.yml
+          git config user.name "David-T-Campos"
+          git config user.email "132998405+David-T-Campos@users.noreply.github.com"
+          git add src/adapters/chatgpt-web/prompt.ts tests/prompt-contract.test.ts .github/workflows/gauntlet-pro-subagents.yml .github/workflows/gauntlet-pro-subagents-2.yml
+          git commit -m "fix: preserve native subagent delegation for Pro"
+          git push origin parity/pro-native-subagents-work
