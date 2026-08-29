@@ -87,6 +87,14 @@ import {
   ChatGptExternalTurnProgress,
   chatGptExternalProgressIsLive,
 } from "./turn-progress";
+import {
+  CHATGPT_LONG_TURN_COMPLETION_AUDIT_AFTER_MS,
+  MAX_CHATGPT_WEB_CONTINUATION_ROUNDS,
+  ChatGptCompletionAuditGate,
+  chatGptContinuationPrompt,
+  chatGptLongTurnNeedsAudit,
+  type ChatGptContinuationReason,
+} from "./continuation";
 
 export { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
 
@@ -3410,15 +3418,29 @@ export class ChatGptBrowserWorker {
       let sawRunning = false;
       let loggedCompletionWait = false;
       let capturedResponse = false;
-      const sentAt = Date.now();
-      const visibleTrace = new ChatGptVisibleTraceTracker();
-      const markdownBuffer = new ChatGptMarkdownBuffer();
+      let roundStartedAt = Date.now();
+      let continuationRounds = 0;
+      let continuationReason: ChatGptContinuationReason | undefined;
+      let completionAuditGate: ChatGptCompletionAuditGate | undefined;
+      let roundBoundary = "";
+      let roundBoundaryEmitted = false;
+      let visibleTrace = new ChatGptVisibleTraceTracker();
+      let markdownBuffer = new ChatGptMarkdownBuffer();
       const checkpointStream = turn.captureLunaCheckpoint
         ? new ChatGptLunaCheckpointStream()
         : undefined;
-      const emitMarkdownDelta = (delta: string): void => {
+      const emitVisibleDelta = (delta: string): void => {
+        if (!delta) return;
         const visible = checkpointStream ? checkpointStream.push(delta) : delta;
         if (visible) turn.onTextDelta(visible);
+      };
+      const emitMarkdownDelta = (delta: string): void => {
+        if (!delta) return;
+        const gated = completionAuditGate ? completionAuditGate.push(delta) : delta;
+        if (!gated) return;
+        const boundary = roundBoundaryEmitted ? "" : roundBoundary;
+        roundBoundaryEmitted = true;
+        emitVisibleDelta(`${boundary}${gated}`);
       };
       const throwMarkdownConsistencyError = (error: unknown): never => {
         if (!(error instanceof ChatGptMarkdownConsistencyError)) throw error;
@@ -3429,11 +3451,127 @@ export class ChatGptBrowserWorker {
           retryable: false,
         });
       };
-      const completionTracker = new ChatGptCompletionTracker();
-      const domHealthTracker = new ChatGptTurnDomHealthTracker();
-      const stoppedThinkingTracker = new ChatGptStoppedThinkingTracker();
-      const responseDomCache: ChatGptResponseDomCache = {};
+      let completionTracker = new ChatGptCompletionTracker();
+      let domHealthTracker = new ChatGptTurnDomHealthTracker();
+      let stoppedThinkingTracker = new ChatGptStoppedThinkingTracker();
+      let responseDomCache: ChatGptResponseDomCache = {};
       let consecutiveObservationRebinds = 0;
+
+      const observeResponseSnapshot = (snapshot: ChatGptResponseDomSnapshot): void => {
+        const textDelta = (() => {
+          try {
+            return markdownBuffer.observe(snapshot.markdownSegments);
+          } catch (error) {
+            return throwMarkdownConsistencyError(error);
+          }
+        })();
+        for (const trace of visibleTrace.observe(snapshot.traceBlocks, snapshot.completionActionVisible)) {
+          if (trace.kind === "commentary") turn.onCommentary?.(trace.text, trace.continuation === true);
+          else turn.onReasoningSummary?.(trace.text, trace.continuation === true);
+        }
+        if (textDelta) emitMarkdownDelta(textDelta);
+      };
+
+      const finishResponseRound = (
+        visibleText: string,
+        acceptAuditCompletion: boolean,
+      ): { auditComplete: boolean } => {
+        const final = (() => {
+          try {
+            return markdownBuffer.finish();
+          } catch (error) {
+            return throwMarkdownConsistencyError(error);
+          }
+        })();
+        if (!final.markdown && visibleText) {
+          throw new Error("ChatGPT completed with visible text that could not be serialized as Markdown");
+        }
+        if (final.delta) emitMarkdownDelta(final.delta);
+        const audit = completionAuditGate?.finish();
+        if (audit?.delta) {
+          const boundary = roundBoundaryEmitted ? "" : roundBoundary;
+          roundBoundaryEmitted = true;
+          emitVisibleDelta(`${boundary}${audit.delta}`);
+        }
+        const sentinelOnly = audit?.complete === true;
+        if (!sentinelOnly && final.markdown) finalText += `${roundBoundary}${final.markdown}`;
+        return { auditComplete: acceptAuditCompletion && sentinelOnly };
+      };
+
+      const continuationSupported = !turn.compaction && !turn.captureLunaCheckpoint;
+      const startContinuationRound = async (reason: ChatGptContinuationReason): Promise<void> => {
+        if (!continuationSupported) {
+          throw new ChatGptWebAdapterError(
+            "This ChatGPT Web flow cannot safely continue inside the same browser response contract",
+            { status: 409, errorType: "invalid_request_error", code: "web_continuation_unavailable", retryable: false },
+          );
+        }
+        if (continuationRounds >= MAX_CHATGPT_WEB_CONTINUATION_ROUNDS) {
+          throw new ChatGptWebAdapterError(
+            `ChatGPT Web could not prove native-turn completion after ${MAX_CHATGPT_WEB_CONTINUATION_ROUNDS} same-conversation continuation rounds`,
+            { status: 502, errorType: "server_error", code: "web_continuation_exhausted", retryable: false },
+          );
+        }
+        continuationRounds += 1;
+        const continuation = chatGptContinuationPrompt(turn.traceId, reason);
+        const continuationBaseline = await this.captureSubmissionBaseline(page);
+        await this.runStage(
+          turn.traceId,
+          `continuation_${continuationRounds}_attachment`,
+          browserStageTimeouts.promptAttachment,
+          (stageSignal) => this.attachPrompt(
+            page,
+            continuation.text,
+            mode.localTools,
+            checkpoint => diagnostics.capture(page, `continuation-${continuationRounds}-${checkpoint}`),
+            turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
+            false,
+            undefined,
+            mode.localTools,
+          ),
+        );
+        const evidence = await this.runStage(
+          turn.traceId,
+          `continuation_${continuationRounds}_send`,
+          browserStageTimeouts.send,
+          (stageSignal) => this.sendAttachedPrompt(
+            page,
+            continuationBaseline,
+            checkpoint => diagnostics.capture(page, `continuation-${continuationRounds}-${checkpoint}`),
+            turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
+            turn.externalProgress,
+          ),
+        );
+        responseTurn = await this.waitForNewAssistantTurn(
+          page,
+          continuationBaseline,
+          deadline,
+          turn.abortSignal,
+          turn.externalProgress,
+        );
+        submissionBaseline = continuationBaseline;
+        continuationReason = reason;
+        completionAuditGate = new ChatGptCompletionAuditGate(continuation.sentinel);
+        roundBoundary = reason === "long_turn_completion" && finalText ? "\n\n" : "";
+        roundBoundaryEmitted = false;
+        roundStartedAt = Date.now();
+        visibleTrace = new ChatGptVisibleTraceTracker();
+        markdownBuffer = new ChatGptMarkdownBuffer();
+        completionTracker = new ChatGptCompletionTracker();
+        domHealthTracker = new ChatGptTurnDomHealthTracker();
+        stoppedThinkingTracker = new ChatGptStoppedThinkingTracker();
+        responseDomCache = {};
+        consecutiveObservationRebinds = 0;
+        sawRunning = false;
+        loggedCompletionWait = false;
+        capturedResponse = false;
+        await diagnostics.capture(page, `continuation-${continuationRounds}-send-accepted`);
+        console.info(
+          `[chatgpt-web] browser turn ${turn.traceId} continuation ${continuationRounds}`
+          + ` started reason=${reason} evidence=${evidence}`,
+        );
+      };
+
       for (;;) {
         if (page.isClosed()) {
           throw chatGptBrowserTabClosedError();
@@ -3505,9 +3643,7 @@ export class ChatGptBrowserWorker {
           }
         }
         if (snapshot.responsePresent) consecutiveObservationRebinds = 0;
-        if (stoppedThinkingTracker.update(snapshot.stoppedThinkingVisible)) {
-          throw chatGptStoppedThinkingError();
-        }
+        const stoppedThinking = stoppedThinkingTracker.update(snapshot.stoppedThinkingVisible);
         if (!snapshot.responsePresent && chatGptExternalProgressIsLive(
           turn.externalProgress?.snapshot(),
           Date.now(),
@@ -3527,18 +3663,14 @@ export class ChatGptBrowserWorker {
             capturedResponse = true;
             await diagnostics.capture(page, "response-visible");
           }
-          const textDelta = (() => {
-            try {
-              return markdownBuffer.observe(snapshot.markdownSegments);
-            } catch (error) {
-              return throwMarkdownConsistencyError(error);
-            }
-          })();
-          for (const trace of visibleTrace.observe(snapshot.traceBlocks, snapshot.completionActionVisible)) {
-            if (trace.kind === "commentary") turn.onCommentary?.(trace.text, trace.continuation === true);
-            else turn.onReasoningSummary?.(trace.text, trace.continuation === true);
+          observeResponseSnapshot(snapshot);
+          if (stoppedThinking) {
+            if (!continuationSupported) throw chatGptStoppedThinkingError();
+            finishResponseRound(snapshot.visibleText, false);
+            await diagnostics.capture(page, "stopped-thinking-continuation");
+            await startContinuationRound("stopped_thinking");
+            continue;
           }
-          if (textDelta) emitMarkdownDelta(textDelta);
           const domError = domHealthTracker.update({
             responsePresent: snapshot.responsePresent,
             running,
@@ -3556,29 +3688,42 @@ export class ChatGptBrowserWorker {
             if (snapshot.visibleText === "api_tool unavailable") {
               throw new Error("ChatGPT selected mode rejected the Codex Native MCP tool (api_tool unavailable)");
             }
-            const final = (() => {
-              try {
-                return markdownBuffer.finish();
-              } catch (error) {
-                return throwMarkdownConsistencyError(error);
-              }
-            })();
-            if (!final.markdown && snapshot.visibleText) {
-              throw new Error("ChatGPT completed with visible text that could not be serialized as Markdown");
-            }
-            if (final.delta) emitMarkdownDelta(final.delta);
             if (checkpointStream) {
+              const final = (() => {
+                try {
+                  return markdownBuffer.finish();
+                } catch (error) {
+                  return throwMarkdownConsistencyError(error);
+                }
+              })();
+              if (!final.markdown && snapshot.visibleText) {
+                throw new Error("ChatGPT completed with visible text that could not be serialized as Markdown");
+              }
+              if (final.delta) emitMarkdownDelta(final.delta);
               const completed = checkpointStream.finishOptional(snapshot.visibleText);
               if (completed.visibleRemainder) turn.onTextDelta(completed.visibleRemainder);
               if (completed.captured) turn.onLunaCheckpoint!(completed.captured);
               else console.warn(`[chatgpt-web] browser turn ${turn.traceId} completed without a Luna rolling checkpoint; preserving full native history`);
               finalText = completed.answer;
-            } else {
-              finalText = final.markdown;
+              break;
+            }
+            const finishedRound = finishResponseRound(snapshot.visibleText, true);
+            if (finishedRound.auditComplete) break;
+            if (
+              continuationSupported
+              && chatGptLongTurnNeedsAudit(
+                roundStartedAt,
+                Date.now(),
+                CHATGPT_LONG_TURN_COMPLETION_AUDIT_AFTER_MS,
+              )
+            ) {
+              await diagnostics.capture(page, "long-turn-completion-audit");
+              await startContinuationRound("long_turn_completion");
+              continue;
             }
             break;
           }
-          if (!loggedCompletionWait && Date.now() - sentAt >= 30_000) {
+          if (!loggedCompletionWait && Date.now() - roundStartedAt >= 30_000) {
             loggedCompletionWait = true;
             await diagnostics.capture(page, "response-stalled-30s");
             const diagnostic = await this.stalledTurnDiagnostic(page, responseTurn.locator).catch(error => JSON.stringify({
