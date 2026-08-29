@@ -1,0 +1,87 @@
+name: Gauntlet native agent depth
+
+on:
+  push:
+    branches:
+      - parity/native-agent-depth-work
+
+permissions:
+  contents: write
+
+jobs:
+  patch-verify-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: parity/native-agent-depth-work
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - name: Match native Codex default agent depth
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          shared = Path('src/codex-integration-shared.ts')
+          text = shared.read_text()
+          assert text.count('export const MIN_COMPATIBILITY_V1_AGENT_DEPTH = 2;') == 1
+          text = text.replace(
+            'export const MIN_COMPATIBILITY_V1_AGENT_DEPTH = 2;',
+            'export const MIN_COMPATIBILITY_V1_AGENT_DEPTH = 1;',
+          )
+          old = 'allows nested routed Web subagents in Compatibility V1.'
+          assert text.count(old) == 1
+          text = text.replace(old, 'matches the native Codex child-agent depth floor in Compatibility V1.')
+          shared.write_text(text)
+
+          live = Path('scripts/smoke-codex-web-subagents.ts')
+          text = live.read_text()
+          assert text.count('  "max_depth = 2",') == 1
+          live.write_text(text.replace('  "max_depth = 2",', '  "max_depth = 1",'))
+
+          tests = Path('tests/codex-integration.test.ts')
+          text = tests.read_text()
+          # Current Compatibility V1 expectations. Do not rewrite historical journal fixtures.
+          assert text.count('installed: { subagent_protocol: "compatibility-v1", agent_max_depth: 2 },') == 1
+          text = text.replace(
+            'installed: { subagent_protocol: "compatibility-v1", agent_max_depth: 2 },',
+            'installed: { subagent_protocol: "compatibility-v1", agent_max_depth: 1 },',
+          )
+          # Two current setup assertions use the managed minimum: install and tamper test.
+          count = text.count('managedAgentMaxDepthLine(2)')
+          assert count == 2, f'expected two current managed depth assertions, found {count}'
+          text = text.replace('managedAgentMaxDepthLine(2)', 'managedAgentMaxDepthLine(1)')
+          tests.write_text(text)
+
+          docs = Path('docs/architecture.md')
+          text = docs.read_text()
+          old = '''  manages `multi_agent = true`, `multi_agent_v2 = false`, and `[agents].max_depth` of at least 2 so
+            a routed child can spawn a routed grandchild.'''
+          new = '''  manages `multi_agent = true`, `multi_agent_v2 = false`, and `[agents].max_depth` of at least 1,
+            matching native Codex's default child-agent depth while preserving any higher user value.'''
+          assert text.count(old) == 1
+          docs.write_text(text.replace(old, new))
+          PY
+      - name: Install root dependencies
+        run: bun install --frozen-lockfile
+      - name: Install launcher dependencies
+        working-directory: launcher
+        run: bun install --frozen-lockfile
+      - name: Targeted integration tests
+        run: bun test tests/codex-integration.test.ts tests/model-catalog.test.ts tests/server-subagents.test.ts
+      - name: Typecheck
+        run: bunx tsc --noEmit
+      - name: Full verification
+        run: bun run verify
+      - name: Commit verified parity fix
+        shell: bash
+        run: |
+          rm .github/workflows/gauntlet-agent-depth.yml
+          git config user.name "David-T-Campos"
+          git config user.email "132998405+David-T-Campos@users.noreply.github.com"
+          git add src/codex-integration-shared.ts scripts/smoke-codex-web-subagents.ts tests/codex-integration.test.ts docs/architecture.md .github/workflows/gauntlet-agent-depth.yml
+          git commit -m "fix: match native Codex agent depth in V1"
+          git push origin parity/native-agent-depth-work
