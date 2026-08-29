@@ -1,0 +1,111 @@
+name: Gauntlet native AgentMessage
+
+on:
+  push:
+    branches:
+      - parity/agent-message-metadata-work
+
+permissions:
+  contents: write
+
+jobs:
+  patch-verify-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: parity/agent-message-metadata-work
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - name: Preserve AgentMessage identity
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          types = Path('src/types.ts')
+          text = types.read_text()
+          marker = '''export interface CodexUserMessage {
+            role: "user";
+            content: string | CodexContentPart[];
+            timestamp: number;
+          }
+          '''
+          replacement = '''export interface CodexUserMessage {
+            role: "user";
+            content: string | CodexContentPart[];
+            /** Present only when this user-role internal item originated as native Responses AgentMessage. */
+            agentMessage?: {
+              author?: string;
+              recipient?: string;
+            };
+            timestamp: number;
+          }
+          '''
+          assert text.count(marker) == 1, 'CodexUserMessage anchor changed'
+          types.write_text(text.replace(marker, replacement))
+
+          parser = Path('src/responses/parser.ts')
+          text = parser.read_text()
+          old = '''        messages.push({
+                  role: "user",
+                  content: hasContent ? content : "(sub-agent message received)",
+                  timestamp: now,
+                });
+          '''
+          new = '''        messages.push({
+                  role: "user",
+                  content: hasContent ? content : "(sub-agent message received)",
+                  agentMessage: {
+                    ...(typeof agentMessage.author === "string" ? { author: agentMessage.author } : {}),
+                    ...(typeof agentMessage.recipient === "string" ? { recipient: agentMessage.recipient } : {}),
+                  },
+                  timestamp: now,
+                });
+          '''
+          assert text.count(old) == 1, 'AgentMessage parser anchor changed'
+          parser.write_text(text.replace(old, new))
+
+          prompt = Path('src/adapters/chatgpt-web/prompt.ts')
+          text = prompt.read_text()
+          marker = '''  if (message.role === "assistant") return { role: "assistant", content: assistantContent(message.content) };
+            return { role: message.role, content: inputContent(message.content, images, budget) };
+          }
+          '''
+          replacement = '''  if (message.role === "assistant") return { role: "assistant", content: assistantContent(message.content) };
+            if (message.role === "user" && message.agentMessage) {
+              return {
+                role: "agent_message",
+                ...(message.agentMessage.author ? { author: message.agentMessage.author } : {}),
+                ...(message.agentMessage.recipient ? { recipient: message.agentMessage.recipient } : {}),
+                content: inputContent(message.content, images, budget),
+              };
+            }
+            return { role: message.role, content: inputContent(message.content, images, budget) };
+          }
+          '''
+          assert text.count(marker) == 1, 'messageEnvelope anchor changed'
+          prompt.write_text(text.replace(marker, replacement))
+          PY
+      - name: Install root dependencies
+        run: bun install --frozen-lockfile
+      - name: Install launcher dependencies
+        working-directory: launcher
+        run: bun install --frozen-lockfile
+      - name: Targeted AgentMessage tests
+        run: bun test tests/agent-message-context.test.ts tests/server-subagents.test.ts tests/prompt-contract.test.ts
+      - name: Typecheck
+        run: bunx tsc --noEmit
+      - name: Full verification
+        run: bun run verify
+      - name: Commit verified parity fix
+        shell: bash
+        run: |
+          rm .github/workflows/gauntlet-agent-message.yml
+          git config user.name "David-T-Campos"
+          git config user.email "132998405+David-T-Campos@users.noreply.github.com"
+          git add src/types.ts src/responses/parser.ts src/adapters/chatgpt-web/prompt.ts tests/agent-message-context.test.ts .github/workflows/gauntlet-agent-message.yml
+          git commit -m "fix: preserve native AgentMessage identity"
+          git push origin parity/agent-message-metadata-work
