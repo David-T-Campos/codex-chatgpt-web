@@ -37,6 +37,11 @@ jobs:
           text = text.replace(old, 'matches the native Codex child-agent depth floor in Compatibility V1.')
           shared.write_text(text)
 
+          journal = Path('src/codex-integration-journal.ts')
+          text = journal.read_text()
+          assert text.count('&& installed.agent_max_depth >= 2))') == 1
+          journal.write_text(text.replace('&& installed.agent_max_depth >= 2))', '&& installed.agent_max_depth >= 1))'))
+
           live = Path('scripts/smoke-codex-web-subagents.ts')
           text = live.read_text()
           assert text.count('  "max_depth = 2",') == 1
@@ -44,13 +49,11 @@ jobs:
 
           tests = Path('tests/codex-integration.test.ts')
           text = tests.read_text()
-          # Current Compatibility V1 expectations. Do not rewrite historical journal fixtures.
           assert text.count('installed: { subagent_protocol: "compatibility-v1", agent_max_depth: 2 },') == 1
           text = text.replace(
             'installed: { subagent_protocol: "compatibility-v1", agent_max_depth: 2 },',
             'installed: { subagent_protocol: "compatibility-v1", agent_max_depth: 1 },',
           )
-          # Two current setup assertions use the managed minimum: install and tamper test.
           count = text.count('managedAgentMaxDepthLine(2)')
           assert count == 2, f'expected two current managed depth assertions, found {count}'
           text = text.replace('managedAgentMaxDepthLine(2)', 'managedAgentMaxDepthLine(1)')
@@ -82,6 +85,6 @@ jobs:
           rm .github/workflows/gauntlet-agent-depth.yml
           git config user.name "David-T-Campos"
           git config user.email "132998405+David-T-Campos@users.noreply.github.com"
-          git add src/codex-integration-shared.ts scripts/smoke-codex-web-subagents.ts tests/codex-integration.test.ts docs/architecture.md .github/workflows/gauntlet-agent-depth.yml
+          git add src/codex-integration-shared.ts src/codex-integration-journal.ts scripts/smoke-codex-web-subagents.ts tests/codex-integration.test.ts docs/architecture.md .github/workflows/gauntlet-agent-depth.yml
           git commit -m "fix: match native Codex agent depth in V1"
           git push origin parity/native-agent-depth-work
