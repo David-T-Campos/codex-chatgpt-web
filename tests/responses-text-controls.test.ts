@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import { compileChatGptWebPrompt } from "../src/adapters/chatgpt-web/prompt";
 import { parseRequest } from "../src/responses/parser";
 
@@ -10,7 +11,7 @@ const capabilities = {
 
 function request(text?: unknown) {
   return parseRequest({
-    model: "chatgpt-web/high",
+    model: CHATGPT_WEB_MODEL_ID,
     stream: true,
     instructions: "Follow the native Codex contract.",
     input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "Return the result." }] }],
@@ -48,7 +49,7 @@ test("strict Responses json_schema format survives parsing without rewriting the
     schema,
   });
   const compiled = compileChatGptWebPrompt(parsed, capabilities, "turn_12345678901234567890123456789012");
-  expect(compiled.text).toContain("Codex requested a strict JSON-schema final answer named answer_payload.");
+  expect(compiled.text).toContain('Codex requested a strict JSON-schema final answer named "answer_payload".');
   expect(compiled.text).toContain(JSON.stringify(schema));
   expect(compiled.text).toContain("one JSON value");
   expect(compiled.text).toContain("Do not wrap it in a Markdown code fence");
@@ -60,7 +61,7 @@ test("non-strict json_schema is preserved as a best-effort format contract", () 
   });
   expect(parsed.options.outputFormat?.strict).toBeFalse();
   const compiled = compileChatGptWebPrompt(parsed, capabilities, "turn_12345678901234567890123456789012");
-  expect(compiled.text).toContain("Codex requested a JSON-schema final answer named item.");
+  expect(compiled.text).toContain('Codex requested a JSON-schema final answer named "item".');
 });
 
 test("absent or unknown Responses text controls do not invent output constraints", () => {
@@ -92,5 +93,5 @@ test("multipart Web transport carries the same native output controls in the com
     { experimentalMultipartParts: 2 },
   );
   expect(compiled.multipart?.commit).toContain("Codex requested high response verbosity.");
-  expect(compiled.multipart?.commit).toContain("strict JSON-schema final answer named result");
+  expect(compiled.multipart?.commit).toContain('strict JSON-schema final answer named "result"');
 });
