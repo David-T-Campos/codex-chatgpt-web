@@ -1,0 +1,106 @@
+name: Gauntlet native history metadata
+
+on:
+  push:
+    branches:
+      - parity/history-metadata-work
+
+permissions:
+  contents: write
+
+jobs:
+  patch-verify-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: parity/history-metadata-work
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - name: Preserve native history metadata
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/adapters/chatgpt-web/prompt.ts')
+          text = path.read_text()
+          old = '''function assistantContent(content: CodexAssistantContentPart[]): unknown[] {
+            return content.map(part => {
+              if (part.type === "text") return { type: "text", text: part.text };
+              if (part.type === "thinking") return { type: "thinking_summary", text: part.thinking };
+              return { type: "tool_call", id: part.id, name: part.name, arguments: part.arguments };
+            });
+          }
+          '''
+          new = '''function assistantContent(content: CodexAssistantContentPart[]): unknown[] {
+            return content.map(part => {
+              if (part.type === "text") return { type: "text", text: part.text };
+              if (part.type === "thinking") return { type: "thinking_summary", text: part.thinking };
+              return {
+                type: "tool_call",
+                id: part.id,
+                name: part.name,
+                ...(part.namespace ? { namespace: part.namespace } : {}),
+                arguments: part.arguments,
+              };
+            });
+          }
+          '''
+          assert text.count(old) == 1, 'assistantContent anchor changed'
+          text = text.replace(old, new)
+
+          old = '''  if (message.role === "toolResult") {
+              return {
+                role: "tool_result",
+                tool_call_id: message.toolCallId,
+                tool_name: message.toolName,
+                is_error: message.isError,
+                content: inputContent(message.content, images, budget),
+              };
+            }
+            if (message.role === "assistant") return { role: "assistant", content: assistantContent(message.content) };
+          '''
+          new = '''  if (message.role === "toolResult") {
+              return {
+                role: "tool_result",
+                tool_call_id: message.toolCallId,
+                tool_name: message.toolName,
+                ...(message.toolNamespace ? { tool_namespace: message.toolNamespace } : {}),
+                is_error: message.isError,
+                content: inputContent(message.content, images, budget),
+              };
+            }
+            if (message.role === "assistant") {
+              return {
+                role: "assistant",
+                ...(message.phase ? { phase: message.phase } : {}),
+                content: assistantContent(message.content),
+              };
+            }
+          '''
+          assert text.count(old) == 1, 'messageEnvelope anchor changed'
+          path.write_text(text.replace(old, new))
+          PY
+      - name: Install root dependencies
+        run: bun install --frozen-lockfile
+      - name: Install launcher dependencies
+        working-directory: launcher
+        run: bun install --frozen-lockfile
+      - name: Targeted history tests
+        run: bun test tests/prompt-history-metadata.test.ts tests/prompt-contract.test.ts tests/chatgpt-web-harness.test.ts
+      - name: Typecheck
+        run: bunx tsc --noEmit
+      - name: Full verification
+        run: bun run verify
+      - name: Commit verified parity fix
+        shell: bash
+        run: |
+          rm .github/workflows/gauntlet-history-metadata.yml
+          git config user.name "David-T-Campos"
+          git config user.email "132998405+David-T-Campos@users.noreply.github.com"
+          git add src/adapters/chatgpt-web/prompt.ts tests/prompt-history-metadata.test.ts .github/workflows/gauntlet-history-metadata.yml
+          git commit -m "fix: preserve native history metadata in Web prompts"
+          git push origin parity/history-metadata-work
