@@ -62,7 +62,7 @@ writeFileSync(join(codexHome, "config.toml"), [
   "supports_websockets = false",
   "",
   "[agents]",
-  "max_depth = 2",
+  "max_depth = 1",
   "",
   "[features]",
   "multi_agent = true",

@@ -14,9 +14,9 @@ export const MANAGED_MULTI_AGENT_V2_LINE =
   "multi_agent_v2 = false # Managed by codex-chatgpt-web: keeps routed Web subagent payloads readable.";
 export const MANAGED_MULTI_AGENT_V2_TABLE_LINE =
   "enabled = false # Managed by codex-chatgpt-web: keeps routed Web subagent payloads readable.";
-export const MIN_COMPATIBILITY_V1_AGENT_DEPTH = 2;
+export const MIN_COMPATIBILITY_V1_AGENT_DEPTH = 1;
 export function managedAgentMaxDepthLine(value: number): string {
-  return `max_depth = ${value} # Managed by codex-chatgpt-web: allows nested routed Web subagents in Compatibility V1.`;
+  return `max_depth = ${value} # Managed by codex-chatgpt-web: matches the native Codex child-agent depth floor in Compatibility V1.`;
 }
 
 export interface PreviousAssignment {

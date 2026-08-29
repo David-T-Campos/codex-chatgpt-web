@@ -32,7 +32,7 @@ function parseJournal(path: string): AnyCodexIntegrationJournal {
         && value.previousAgentMaxDepth
         && typeof installed.agent_max_depth === "number"
         && Number.isSafeInteger(installed.agent_max_depth)
-        && installed.agent_max_depth >= 2))
+        && installed.agent_max_depth >= 1))
     && value.previous
     && typeof value.configPath === "string") {
     return value as unknown as CodexIntegrationJournal;

@@ -148,8 +148,8 @@ and new installations default to Compatibility V1 because it is the only surface
 native and routed Web backends:
 
 - **Compatibility V1** pins every delegation-capable native and routed row to V1 and atomically
-  manages `multi_agent = true`, `multi_agent_v2 = false`, and `[agents].max_depth` of at least 2 so
-  a routed child can spawn a routed grandchild. The integration journal preserves the user's prior
+  manages `multi_agent = true`, `multi_agent_v2 = false`, and `[agents].max_depth` of at least 1,
+  matching native Codex's default child-agent depth while preserving any higher user value. The integration journal preserves the user's prior
   scalar, structured-feature, and agent-depth lines and restores them byte-for-byte on disconnect,
   native-mode selection, or uninstall. The ChatGPT connector projects `wait_agent` as an explicit
   10-second polling contract: terminal semantics stay native, while every non-terminal poll releases

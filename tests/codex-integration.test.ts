@@ -148,13 +148,13 @@ describe("reversible native Codex route integration", () => {
     const installed = readFileSync(configPath, "utf8");
     expect(journal).toMatchObject({
       version: 8,
-      installed: { subagent_protocol: "compatibility-v1", agent_max_depth: 2 },
+      installed: { subagent_protocol: "compatibility-v1", agent_max_depth: 1 },
       previousMultiAgent: { rawLine: "multi_agent = false # user choice", value: "false" },
       previousMultiAgentV2: { rawLine: "multi_agent_v2 = true # user choice", value: "true" },
     });
     expect(installed).toContain("multi_agent = true # Managed by codex-chatgpt-web");
     expect(installed).toContain("multi_agent_v2 = false # Managed by codex-chatgpt-web");
-    expect(installed).toContain(managedAgentMaxDepthLine(2));
+    expect(installed).toContain(managedAgentMaxDepthLine(1));
     expect(installed).toContain("goals = true");
 
     expect(deactivateCodexIntegration()).toEqual({ changed: true, active: false });
@@ -242,7 +242,7 @@ describe("reversible native Codex route integration", () => {
     writeFileSync(configPath, 'model = "gpt-5.6-sol"\n');
     installCodexIntegration(compatibilityV1Config("browser-only"));
     const edited = readFileSync(configPath, "utf8").replace(
-      managedAgentMaxDepthLine(2),
+      managedAgentMaxDepthLine(1),
       "max_depth = 3 # user changed this after setup",
     );
     writeFileSync(configPath, edited);
