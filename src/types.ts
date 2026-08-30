@@ -30,12 +30,21 @@ export interface CodexContext {
 
 export type CodexMessage =
   | CodexUserMessage
+  | CodexAgentMessage
   | CodexAssistantMessage
   | CodexDeveloperMessage
   | CodexToolResultMessage;
 
 export interface CodexUserMessage {
   role: "user";
+  content: string | CodexContentPart[];
+  timestamp: number;
+}
+
+export interface CodexAgentMessage {
+  role: "agentMessage";
+  author?: string;
+  recipient?: string;
   content: string | CodexContentPart[];
   timestamp: number;
 }
